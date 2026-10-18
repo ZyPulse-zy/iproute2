@@ -766,6 +766,38 @@ static void print_rta_multipath(FILE *fp, const struct rtmsg *r,
 	close_json_array(PRINT_JSON, NULL);
 }
 
+static void flush_nexthop_compat(struct nlmsghdr *n,
+				const struct nlmsghdr *source)
+{
+	const struct rtmsg *r = NLMSG_DATA(source);
+	struct rtmsg *flushed = NLMSG_DATA(n);
+	const struct rtattr *rta = RTM_RTA(r);
+	int len = RTM_PAYLOAD(source);
+	char *dst = (char *)n + NLMSG_LENGTH(sizeof(*r));
+
+	for (; RTA_OK(rta, len); rta = RTA_NEXT(rta, len)) {
+		switch (rta->rta_type & NLA_TYPE_MASK) {
+		case RTA_OIF:
+		case RTA_GATEWAY:
+		case RTA_MULTIPATH:
+		case RTA_VIA:
+		case RTA_ENCAP_TYPE:
+		case RTA_ENCAP:
+			continue;
+		}
+		memcpy(dst, rta, RTA_ALIGN(rta->rta_len));
+		dst += RTA_ALIGN(rta->rta_len);
+	}
+	n->nlmsg_len = dst - (char *)n;
+	/* IPv4 displays a blackhole object as RTN_BLACKHOLE regardless of
+	 * the FIB alias's original type. Without a type selector, omit that
+	 * synthesized constraint. Never weaken an explicit type filter.
+	 */
+	if (!filter.typemask &&
+	    r->rtm_family == AF_INET && r->rtm_type == RTN_BLACKHOLE)
+		flushed->rtm_type = RTN_UNSPEC;
+}
+
 int print_route(struct nlmsghdr *n, void *arg)
 {
 	FILE *fp = (FILE *)arg;
@@ -810,10 +842,15 @@ int print_route(struct nlmsghdr *n, void *arg)
 		}
 		fn = (struct nlmsghdr *)(filter.flushb + NLMSG_ALIGN(filter.flushp));
 		memcpy(fn, n, n->nlmsg_len);
+		/* Keep the exact nexthop ID; its compatibility expansion conflicts
+		 * with that ID in the delete request.
+		 */
+		if (tb[RTA_NH_ID])
+			flush_nexthop_compat(fn, n);
 		fn->nlmsg_type = RTM_DELROUTE;
 		fn->nlmsg_flags = NLM_F_REQUEST;
 		fn->nlmsg_seq = ++rth.seq;
-		filter.flushp = (((char *)fn) + n->nlmsg_len) - filter.flushb;
+		filter.flushp = (((char *)fn) + fn->nlmsg_len) - filter.flushb;
 		filter.flushed++;
 		if (show_stats < 2)
 			return 0;
