@@ -1,0 +1,52 @@
+name: Validate nexthop route flush on actual kernel
+on:
+  push:
+    branches: [bootstrap/nexthop-flush-import]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact signed-off source
+        run: |
+          base64 -d .bootstrap/nexthop-flush.bundle.b64 > /tmp/flush.bundle
+          echo 'b6f1a41c614bd87844eab5ad65883b4ecad3e5e448b348f9c70f18058966cc3d  /tmp/flush.bundle' | sha256sum -c -
+          git fetch /tmp/flush.bundle HEAD:refs/remotes/import/candidate
+          test "$(git rev-parse refs/remotes/import/candidate)" = f5f5162b6796e8e307ddd00cc6402b7c9ffc8cd1
+          git checkout --detach refs/remotes/import/candidate
+          git log -1 --format=%B | grep -Fx 'Signed-off-by: Yuen Su <zypulsecore@gmail.com>'
+      - name: Install build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y build-essential pkg-config libmnl-dev libelf-dev libcap-dev bison flex
+      - name: Show actual environment and load test module
+        run: uname -a && sudo modprobe dummy
+      - name: Build complete fixed ip utility
+        run: make SUBDIRS='lib ip' -j2
+      - name: Reproduce original implementation failure
+        run: |
+          git worktree add --detach /tmp/ip-original e11870d5b9414b2e0770463bd6fc2399744dc734
+          cp testsuite/tests/ip/route/flush_nexthop.t /tmp/ip-original/testsuite/tests/ip/route/
+          make -C /tmp/ip-original SUBDIRS='lib ip' -j2
+          cd /tmp/ip-original/testsuite
+          sudo env IPROUTE_TEST_PARENT_NETNS="$(readlink /proc/self/ns/net)" IP=/tmp/ip-original/ip/ip STD_ERR=/tmp/original.stderr STD_OUT=/tmp/original.stdout ERRF=/tmp/original.errors unshare -n sh tests/ip/route/flush_nexthop.t > /tmp/original-test.log 2>&1
+          test -s /tmp/original.errors
+          grep -E 'Invalid argument|Nexthop specification and nexthop id' /tmp/original.errors
+      - name: Fixed full actual-kernel matrix
+        run: |
+          cd testsuite
+          sudo env IPROUTE_TEST_PARENT_NETNS="$(readlink /proc/self/ns/net)" IP="$GITHUB_WORKSPACE/ip/ip" STD_ERR=/tmp/fixed.stderr STD_OUT=/tmp/fixed.stdout ERRF=/tmp/fixed.errors unshare -n sh tests/ip/route/flush_nexthop.t
+          test ! -e /tmp/fixed.errors
+      - name: Build complete ASan and UBSan utility
+        run: |
+          git worktree add --detach /tmp/ip-sanitize HEAD
+          make -C /tmp/ip-sanitize SUBDIRS='lib ip' CCOPTS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' LDFLAGS='-fsanitize=address,undefined -Wl,-export-dynamic' -j2
+      - name: Same actual-kernel matrix with sanitizers
+        run: |
+          cd /tmp/ip-sanitize/testsuite
+          sudo env IPROUTE_TEST_PARENT_NETNS="$(readlink /proc/self/ns/net)" IP=/tmp/ip-sanitize/ip/ip STD_ERR=/tmp/asan.stderr STD_OUT=/tmp/asan.stdout ERRF=/tmp/asan.errors unshare -n sh tests/ip/route/flush_nexthop.t
+          test ! -e /tmp/asan.errors
+      - name: Publish tested candidate without claiming upstream submission
+        run: git push --force-with-lease=refs/heads/fix/route-flush-nexthop-compat:e11870d5b9414b2e0770463bd6fc2399744dc734 origin HEAD:refs/heads/fix/route-flush-nexthop-compat
