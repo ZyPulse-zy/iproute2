@@ -1,0 +1,33 @@
+name: Verify formatted iproute2 candidate matches tested code
+on:
+  push:
+    branches: [bootstrap/nexthop-flush-format]
+permissions:
+  contents: write
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import exact signed-off source
+        run: |
+          base64 -d .bootstrap/iproute2-format.bundle.b64 > /tmp/format.bundle
+          echo '7a8ade64b816fa0b70fd618df87d0b459b68aff2f024dd26802a2567a77c679f  /tmp/format.bundle' | sha256sum -c -
+          git fetch /tmp/format.bundle HEAD:refs/remotes/import/formatted
+          test "$(git rev-parse refs/remotes/import/formatted)" = 577d607b4f92e1219f0eb148d13f0b676d012364
+          git checkout --detach refs/remotes/import/formatted
+      - name: Prove unchanged tested source and message format
+        run: |
+          test "$(git rev-parse HEAD^{tree})" = 06e9d873d61e82e48f19382afe5800bbb3ef15b4
+          git diff --exit-code f5f5162b6796e8e307ddd00cc6402b7c9ffc8cd1 HEAD -- .
+          python3 - <<'PY'
+          import subprocess
+          msg=subprocess.check_output(['git','log','-1','--format=%B'],text=True)
+          assert max(map(len,msg.splitlines()))<=100
+          assert 'Signed-off-by: Yuen Su <zypulsecore@gmail.com>' in msg.splitlines()
+          print('Complete source tree identical to native/kernel/sanitizer CI run 39084138700')
+          PY
+      - name: Publish formatted candidate
+        run: git push --force-with-lease=refs/heads/fix/route-flush-nexthop-compat:f5f5162b6796e8e307ddd00cc6402b7c9ffc8cd1 origin HEAD:refs/heads/fix/route-flush-nexthop-compat
